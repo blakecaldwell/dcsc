@@ -9,7 +9,7 @@ import pika
 import threading,time,sys
 import fib_pb2
 
-QHost = "sdr.cs.colorado.edu"
+QHost = os.getenv('QHOST')
 
 connection = pika.BlockingConnection(
     pika.ConnectionParameters(host=QHost))
@@ -48,6 +48,10 @@ while True:
         n = 0
     except EOFError:
         n = 0
+
+    if n >= 100000:
+	print "What are you trying to crash this or something? Less than 100000 please"
+        continue
 
     if  n == 0 :
         print "Done, exiting..."
