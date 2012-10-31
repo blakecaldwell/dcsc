@@ -6,6 +6,7 @@ from optparse import OptionParser
 from boto.ec2.connection import EC2Connection
 from boto.ec2.regioninfo import RegionInfo
 import sys, os, re, time, gzip
+import dyndnsupdate
 
 def parse_url(url):
     "Extract the components of a URL path for EC2/S3"
@@ -121,14 +122,16 @@ def main(*args):
         server_ip = server_instance.ip_address
         print 'Started the queue server: {0}'.format(server_ip)
         server_private_ip = server_instance.private_ip_address
+        dyndnsupdate.dyndns_update(server_ip)
 
 	# modify QHOST
-        client_user_data_file  = 'combined-userdata-client.txt'
-        user_data_to_client = insert_queue_server(client_user_data_file,server_private_ip)   
+        # no longer needed now with dyndns.org
+        #client_user_data_file  = 'combined-userdata-client.txt'
+        #user_data_to_client = insert_queue_server(client_user_data_file,server_private_ip)   
  
         # start the workers
 	num_instances = int(N)
-	worker_reservation = create_openstack_reservation(conn,IMAGE, INSTANCE_TYPE, KEY_NAME,user_data_to_client,num_instances)
+	worker_reservation = create_openstack_reservation(conn,IMAGE, INSTANCE_TYPE, KEY_NAME,client_user_data_file,num_instances)
         print "Wait for workers"
         wait_for_reservation_to_be_public(worker_reservation, True)
 
