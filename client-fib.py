@@ -8,8 +8,14 @@
 import pika
 import time,sys,os
 import fib_pb2
+import logging
 
-QHost = os.getenv('QHOST')
+if os.getenv('QHOST'):
+  QHost = os.getenv('QHOST')
+else:
+  QHost = "127.0.0.1"
+
+logging.basicConfig(filename="/tmp/client-fib.log", level=logging.INFO)
 
 connection = pika.BlockingConnection(
     pika.ConnectionParameters(host=QHost))
