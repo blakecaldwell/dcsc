@@ -23,139 +23,150 @@ import org.apache.hadoop.util.ToolRunner;
 
 public class PatentJoin extends Configured implements Tool {
     static enum PatentJoinType {
-	MAP_CITE_FILE, MAP_PAT_FILE,
+	MAP_CITE_FILE, MAP_PAT_FILE, BAD_RECORD_IN_REDUCE,
 	    CITE_VALID, CITE_INVALID, CMADE_VALID,
-	    PAT_VALID_STATE, PAT_INVALID_STATE,
-	    NUMBER_EXCEPTION, PAT_INVALID_COUNTRY, BAD_RECORD
+	    PAT_VALID_STATE, PAT_INVALID_STATE, KEY_NOT_NUM,
+	    NUMBER_EXCEPTION, PAT_INVALID_COUNTRY, BAD_RECORD,
+	    REDUCE_INVALID_STATE, REDUCE_VALID_STATE, REDUCE_BAD_RECORD
 	    };
     
 
     public static class mapperA extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
-	private Text state = new Text();
-	private Text country = new Text();
 	private Text cited = new Text();
+	private Text country = new Text();
+	private Text state = new Text();
 	private LongWritable patent = new LongWritable();
-	private String token = new String();
 	private final static Text us_country = new Text("\"US\"");
 
 	public void map(LongWritable key, Text value, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
-	    int count = 0;
 	    int numTokens = 0;
+	    Long number = 0L;
+	    String bookend = "\"";
 	    String line = value.toString();
-	    String first_token = new String();
-	    StringTokenizer tokenizer = new StringTokenizer(line,",");
-
-	    numTokens = tokenizer.countTokens();
-	    if (numTokens > 2) {
-		// this is the patent file
-		while (tokenizer.hasMoreTokens()) {           // iterate tokens separated by "," in a line
-		    token = tokenizer.nextToken();
-		    // skip the first 4 tokens (3 + the first one)
-		    if (count == 0) {
-			// just store this in case this is the first line
-			first_token=token;
-		    }
-		    else if (count == 4) {
-			country.set(token);
-			if (country.equals(us_country) == false) { 	// make sure its in the US and then get the state
-			    break;
+            String[] words = line.split(",");
+	    
+	    numTokens = words.length;
+	    
+	    if (numTokens > 5) {
+		country.set(words[4]);
+		if (country.equals(us_country) == true) { 	// make sure its in the US and then get the state   
+		    if ((words[5].length() == 4) && (words[5].startsWith(bookend)) && (words[5].endsWith(bookend))) {
+			reporter.incrCounter(PatentJoinType.PAT_VALID_STATE,1);
+			// now set the patent number
+			try {
+			    number = Long.parseLong(words[0],10);
+			    patent.set(number);
+			} catch (java.lang.NumberFormatException e) {
+			    reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
 			}
-		    }	
-		    else if (count == 5) {
-			// check that state is two characters
- 		    
-			if (token.length() == 4) {
-			    // now set the patent number
-			    patent.set(Long.parseLong(first_token,10));
-			
-			    state.set(token);
-			    output.collect(patent,state);
-			}
-			break;
+			state.set(words[5]);
+			output.collect(patent,state);
 		    }
-		    count++;
+		    else {
+			reporter.incrCounter(PatentJoinType.PAT_INVALID_STATE,1);
+		    }
+		}
+		else {
+		    reporter.incrCounter(PatentJoinType.PAT_INVALID_COUNTRY,1);
 		}
 	    }
 	    else if (numTokens == 2) {
-		// this is the citation file
+		// this is the citation file. just pass all by the first record through
 		String skip_string = "\"CITING\"";
-		while (tokenizer.hasMoreTokens()) {           // iterate tokens separated by "," in a line
-		    token = tokenizer.nextToken();
-		    if (count == 0) {
-			if (token.startsWith(skip_string)) {
-			    break;
-			}
-			else {
-			    patent.set(Long.parseLong(token,10));
-			}
+		if (! words[0].startsWith(skip_string)) {
+		    try {
+			patent.set(Long.parseLong(words[0],10));
+		    } catch (java.lang.NumberFormatException e) {
+			reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
 		    }
-		    else if (count == 1) {
-			cited.set(token);
-			output.collect(patent,cited);
-		    }	
-		    count++;
+		    cited.set(words[1]);
+		    output.collect(patent,cited);
 		}
 	    }
 	}
     }
-
+    
     public static class Reduce extends MapReduceBase implements Reducer<LongWritable, Text, LongWritable,Text>  {
         public void reduce(LongWritable key, Iterator<Text> values, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
 	    String patent_state=null;
 	    ArrayList<String> citedPatents= new ArrayList<String>();
 	    String currentVal=null;
+	    String bookend = "\"";
 	    Text value = new Text();
+
 	    while (values.hasNext()) { 
 		currentVal = values.next().toString();
-		if (currentVal.length() == 4) {
+		if ((currentVal.length() == 4) &&
+		    (currentVal.startsWith(bookend)) && 
+		    (currentVal.endsWith(bookend))) {
+		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_STATE,1);
 		    patent_state = currentVal;
 		}
 		else {
 		    citedPatents.add(currentVal);
 		}
-	    }
-	    
+	    }	    
 	    if (patent_state != null) {
 		for (String val: citedPatents) {
 		    value.set(val + " " + patent_state);
 		    output.collect(key, value);
 		}
 	    }
+	    else {
+		reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
+	    }
 	}
     }
     public static class swizzler extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
 	private Text values = new Text();
 	private Text country = new Text();
-	private LongWritable cited_key = new LongWritable();
-	private LongWritable patent = new LongWritable();
-	private String value_string = new String();
+	private LongWritable output_key = new LongWritable();
 	private final static Text us_country = new Text("\"US\"");
 
 	public void map(LongWritable key, Text value, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
 	    int numTokens = 0;
 	    long num_citations_made = 0;
 	    String line = value.toString();
-            String[] words = line.split(",");
+            ArrayList<String> myWords = new ArrayList<String>();
+	    if (line.split(",").length <= 1) {
+		// hmm, splitting on ',' is not working well, so split on whitespace
+		StringTokenizer tokenizer = new StringTokenizer(line);
+		while (tokenizer.hasMoreTokens()) {           // iterate tokens separated by "," in a line
+		    myWords.add(tokenizer.nextToken());
+		}
+	    }
+	    else {
+		for (String str : line.split(",")) {
+		    myWords.add(str);
+		}
+	    }
+	    String[] words = myWords.toArray(new String[myWords.size()]);
 	    numTokens = words.length;
 
-	    if (numTokens > 5) {	// this is the patent file
-		System.out.println("There are " + numTokens + " tokens");
+	    if (numTokens > 3) {	// this is the patent file
 		country.set(words[4]);
 		if (country.equals(us_country) == true) { 	// make sure its in the US and then get the state
 		    if (words[5].length() == 4) { 
 			reporter.incrCounter(PatentJoinType.PAT_VALID_STATE,1);
 			if (words[12] != null) {
 			    try {
-				num_citations_made = Long.parseLong(words[12],10);
+				num_citations_made = Long.parseLong(words[12],10);				    
 			    } catch (java.lang.NumberFormatException e) {
+				System.err.println("error turning into long: " + words[12]);
 				reporter.incrCounter(PatentJoinType.NUMBER_EXCEPTION,1);
 				num_citations_made = 0;
 			    }
-			    reporter.incrCounter(PatentJoinType.CMADE_VALID,1);
-			    patent.set(Long.parseLong(words[0],10));
-			    value_string = words[5] + " " + num_citations_made;
-			    values.set(value_string);
-			    output.collect(patent,values);
+			    if (num_citations_made > 0) {
+				reporter.incrCounter(PatentJoinType.CMADE_VALID,1);
+				try {
+				    output_key.set(Long.parseLong(words[0],10));
+				} catch (java.lang.NumberFormatException e) {
+				    reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
+				}
+				// send on the whole line to the reducer
+				values.set(words[5] + " " + words [12]);
+				output.collect(output_key,values);
+			    }
 			}
 		    }
 		    else {
@@ -166,15 +177,27 @@ public class PatentJoin extends Configured implements Tool {
 		    reporter.incrCounter(PatentJoinType.PAT_INVALID_COUNTRY,1);
 		}		
 	    }
-	    else if (numTokens >1 ) {     // this is the citation file
+	    else if (numTokens == 3 ) {     // this is the citation file
 		String skip_string = "\"CITING\"";
 		if (! words[0].startsWith(skip_string)) {
-		    cited_key.set(Long.parseLong(words[1],10));
-		    //value_string = words[0] + " " + words[2];
-		    value_string = words[2];
-		    values.set(value_string);
-		    output.collect(cited_key, values);
-		    reporter.incrCounter(PatentJoinType.CITE_VALID,1);	       
+		    // swizzle: make the cited patent the key
+		    try {
+			output_key.set(Long.parseLong(words[1],10));
+		    } catch (java.lang.NumberFormatException e) {
+			reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
+		    }
+		    // leave out the CITING patent - don't need now that we know the state
+		    String bookend = "\"";
+		    // make sure this is actually a string
+		    //if ((words[2].startsWith(bookend)) && (words[2].endsWith(bookend))) {
+		    if (words[2].length() == 4) {
+			output.collect(output_key, values);
+			reporter.incrCounter(PatentJoinType.CITE_VALID,1);	       
+		    }
+		    else {
+			reporter.incrCounter(PatentJoinType.BAD_RECORD,1);
+			System.err.println("Value should be a state: " + words[2]);
+		    }
 		}
 		else {
 		    reporter.incrCounter(PatentJoinType.CITE_INVALID,1);
@@ -182,7 +205,49 @@ public class PatentJoin extends Configured implements Tool {
 	    }
 	    else {
 		reporter.incrCounter(PatentJoinType.BAD_RECORD,1);
-		System.out.println("BAD RECORD = " + line );
+		System.err.println("Strange number of tokens in record:" + numTokens);
+	    }
+	}
+    }
+    public static class augmenter extends MapReduceBase implements Reducer<LongWritable, Text, LongWritable,Text>  {
+	private String patent_state=null;
+	private int cited_count = 0;
+	private String patent_line=null;
+	private ArrayList<String> citedStates= new ArrayList<String>();
+	private String currentVal=null;
+	private Text value = new Text();
+	
+        public void reduce(LongWritable key, Iterator<Text> values, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
+	    while (values.hasNext()) { 
+		currentVal = values.next().toString();
+		if (currentVal.length() > 4) {
+		    // this is the patent data
+		    patent_line = currentVal;
+		}
+		else {
+		    // these are states of patents cited by this one
+		    citedStates.add(currentVal);
+		}
+	    }
+	    
+	    if (patent_line != null) {
+		patent_state = currentVal.split(",")[5];
+		if (patent_state.length() == 4) {
+		    for (String state: citedStates) {
+			if (state == patent_state) {
+			    cited_count++;
+			}
+		    }
+		    value.set(patent_state + "," + cited_count);
+		    output.collect(key, value);
+		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_STATE,1);
+		}
+		else {
+		    reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
+		}
+	    }
+	    else {
+		reporter.incrCounter(PatentJoinType.REDUCE_BAD_RECORD,1);
 	    }
 	}
     }
@@ -213,7 +278,7 @@ public class PatentJoin extends Configured implements Tool {
 	//JobConf reduceConf = new JobConf(false);
 	//ChainReducer.setReducer(conf, Reduce.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceConf);
 	job1.setReducerClass(Reduce.class);
-        //JobClient.runJob(job1);
+        JobClient.runJob(job1);
 
 	JobConf job2 = new JobConf(new Configuration(), PatentJoin.class);
 	job2.setJobName("patentjoin2");        
@@ -229,7 +294,7 @@ public class PatentJoin extends Configured implements Tool {
         //JobConf mapBConf = new JobConf(false);
         //ChainReducer.addMapper(conf, swizzler.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapBConf);        
         job2.setMapperClass(swizzler.class);
-	//job2.setReducerClass(IdentityReducer.class);
+	//job2.setReducerClass(augmenter.class);
 	JobClient.runJob(job2);
 	return 0;
     }
