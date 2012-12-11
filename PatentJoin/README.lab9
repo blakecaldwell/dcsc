@@ -1,0 +1,23 @@
+CSCI 7000
+Datacenter Scale Computing
+
+Blake Caldwell
+Decmber 11, 2012
+
+
+FILES:
+PatentJoin.java
+output.txt
+Makefile
+README.lap9
+
+
+The output for this program shows a couple entries which are obviously not states (e.g. "CZ").  However, since 
+the country was listed as "US", I have no way of knowing if they should be completely thrown out.  Instead of
+creating individual cases, I left them in.
+
+This program runs 3 mapreduce jobs to accomplish the calculation of the perctage of patents within a state that 
+cite other patents in the same state.
+
+ChainMapper is used in the second job to demonstrate its usage.  Reduce-side joins are used in the reduce stages
+of all three jobs.

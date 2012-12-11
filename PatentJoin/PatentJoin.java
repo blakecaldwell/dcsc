@@ -7,6 +7,7 @@
 package org.myorg;
         
 import java.io.IOException;
+import java.lang.Integer;
 import java.util.*;
 
 import org.apache.hadoop.conf.Configuration;
@@ -27,14 +28,14 @@ public class PatentJoin extends Configured implements Tool {
 	    CITE_VALID, CITE_INVALID, CMADE_VALID,
 	    PAT_VALID_STATE, PAT_INVALID_STATE, KEY_NOT_NUM,
 	    CMADE_INVALID, PAT_INVALID_COUNTRY, BAD_RECORD,
-	    REDUCE_INVALID_STATE, REDUCE_VALID_STATE, REDUCE_BAD_RECORD,
-	    AUGMENT_CITED_STATE_RECORD, AUGMENT_PATENT_RECORD,
-	    PAT_RECORD, CIT_RECORD, INTERMEDIATE_RECORD
+	    REDUCE_VALID_PAT_RECORD, REDUCE_VALID_CIT_RECORD, REDUCE_INVALID_RECORD,
+	    AUGMENT_VALID_CIT_RECORD,AUGMENT_VALID_PAT_RECORD,AUGMENT_INVALID_RECORD,
+	    PAT_RECORD, CIT_RECORD, INTERMEDIATE_RECORD, REDUCE_VALID_INTERMEDIATE_RECORD
 	    };
     
 
     public static class filterMapper extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
-	private Text cited = new Text();
+	private Text citing = new Text();
 	private Text country = new Text();
 	private Text state = new Text();
 	private Text out_value = new Text();
@@ -81,16 +82,17 @@ public class PatentJoin extends Configured implements Tool {
 	    }
 	    else if (numTokens == 2) {
 		reporter.incrCounter(PatentJoinType.CIT_RECORD,1);
-		// this is the citation file. just pass all but the first record through
+		// this is the citation file. swizzle cited and citing
+		// and then pass all but the first record through
 		String skip_string = "\"CITING\"";
 		if (! words[0].startsWith(skip_string)) {
 		    try {
-			patent.set(Long.parseLong(words[0],10));
+			patent.set(Long.parseLong(words[1],10));
 		    } catch (java.lang.NumberFormatException e) {
 			reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
 		    }
-		    cited.set(words[1]);
-		    output.collect(patent,cited);
+		    citing.set(words[0]);
+		    output.collect(patent,citing);
 		}
 	    }
 	    else {
@@ -103,31 +105,43 @@ public class PatentJoin extends Configured implements Tool {
     public static class Reduce extends MapReduceBase implements Reducer<LongWritable, Text, LongWritable,Text>  {
         public void reduce(LongWritable key, Iterator<Text> values, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
 	    String patent_state=null;
-	    ArrayList<String> citedPatents= new ArrayList<String>();
+	    ArrayList<String> citingPatents= new ArrayList<String>();
 	    String currentVal=null;
 	    String bookend = "\"";
 	    Text value = new Text();
+	    LongWritable citing = new LongWritable();
+	    String[] words;
+	    int numTokens = 0;
 
 	    while (values.hasNext()) { 
 		currentVal = values.next().toString();
-		if ((currentVal.length() == 4) &&
-		    (currentVal.startsWith(bookend)) && 
-		    (currentVal.endsWith(bookend))) {
-		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_STATE,1);
-		    patent_state = currentVal;
+		words=currentVal.split(",");
+		numTokens = words.length;
+		if (numTokens > 5) {
+		    // patent data
+		    if ((words[5].length() == 4) &&
+			(words[5].startsWith(bookend)) && 
+			(words[5].endsWith(bookend))) {
+			reporter.incrCounter(PatentJoinType.REDUCE_VALID_PAT_RECORD,1);
+			patent_state = words[5];
+		    }
 		}
 		else {
-		    citedPatents.add(currentVal);
+		    // citation data
+		    citingPatents.add(currentVal);
 		}
 	    }	    
 	    if (patent_state != null) {
-		for (String val: citedPatents) {
-		    value.set(val + " " + patent_state);
-		    output.collect(key, value);
+		for (String val: citingPatents) {
+		    // swizzle back
+		    citing.set(Long.parseLong(val,10));
+		    value.set(key.toString() + " " + patent_state);
+		    output.collect(citing, value);
+		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_INTERMEDIATE_RECORD,1);
 		}
 	    }
 	    else {
-		reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
+		reporter.incrCounter(PatentJoinType.REDUCE_INVALID_RECORD,1);
 	    }
 	}
     }
@@ -203,13 +217,12 @@ public class PatentJoin extends Configured implements Tool {
 	    else if (numTokens == 3 ) {     // this is intermediate citation data with the state
 		String skip_string = "\"CITING\"";
 		if (! words[0].startsWith(skip_string)) {
-		    // swizzle: make the cited patent the key
 		    try {
-			output_key.set(Long.parseLong(words[1],10));
+			output_key.set(Long.parseLong(words[0],10));
 		    } catch (java.lang.NumberFormatException e) {
 			reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
 		    }
-		    // leave out the CITING patent - don't need now that we know the state
+		    // leave out the CITED patent - don't need now that we know the state
 		    String bookend = "\"";
 		    // make sure this is actually a string
 		    if ((words[2].length() == 4) &&
@@ -248,12 +261,11 @@ public class PatentJoin extends Configured implements Tool {
 	       currentVal = values.next().toString();
 	       num_splits = currentVal.split(",").length;
 	       if (num_splits > 1) {
-		   reporter.incrCounter(PatentJoinType.AUGMENT_PATENT_RECORD,1);
 		   // this is the patent data
 		   patent_line = currentVal;
 	       }
 	       else if (num_splits == 1) {
-		   reporter.incrCounter(PatentJoinType.AUGMENT_CITED_STATE_RECORD,1);
+		   reporter.incrCounter(PatentJoinType.AUGMENT_VALID_CIT_RECORD,1);
 		   // these are states of patents cited by this one
 		   citedStates.add(currentVal);
 	       }
@@ -267,18 +279,80 @@ public class PatentJoin extends Configured implements Tool {
 			   cited_count++;
 		       }
 		   }
+		   if (cited_count == 8) {
+		       System.err.println("cited: " + cited_count);
+		   }
 		   value.set(patent_line + "," + cited_count);
-		    output.collect(key, value);
-		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_STATE,1);
-	       }
-	       else {
-		   reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
+		   output.collect(key, value);
+		   reporter.incrCounter(PatentJoinType.AUGMENT_VALID_PAT_RECORD,1);
 	       }
 	   }
 	   else {
-	       reporter.incrCounter(PatentJoinType.REDUCE_BAD_RECORD,1);	       
+	       reporter.incrCounter(PatentJoinType.AUGMENT_INVALID_RECORD,1);
 	   }
        }
+    }    
+    public static class swizzleState extends MapReduceBase implements Mapper<LongWritable, Text, Text, Text> {
+	private Text state = new Text();
+	private Text country = new Text();
+	private Text count = new Text();
+	private final static Text us_country = new Text("\"US\"");
+
+	public void map(LongWritable key, Text value, OutputCollector<Text,Text> output, Reporter reporter) throws IOException {
+	    String bookend = "\"";
+	    String line = value.toString();
+            String[] words = line.split(",");
+	    
+	    int numTokens = words.length;
+	    
+	    if (numTokens > 5) {
+		// should be, since the is patent data
+		reporter.incrCounter(PatentJoinType.PAT_RECORD,1);
+		// This is a patent record. Our goal here is to pass through records that:
+		//   1. are in the US
+		//   2. have a valid state 
+		country.set(words[4]);
+		if (country.equals(us_country) == true) { 	// make sure its in the US and then get the state   
+		    if ((words[5].length() == 4) && (words[5].startsWith(bookend)) && (words[5].endsWith(bookend))) {
+			reporter.incrCounter(PatentJoinType.PAT_VALID_STATE,1);
+			state.set(words[5]);
+			
+			count.set(words[words.length-1] + "," + words[12]);
+			output.collect(state,count);
+		    }
+		    else {
+			reporter.incrCounter(PatentJoinType.PAT_INVALID_STATE,1);
+		    }
+		}
+		else {
+		    reporter.incrCounter(PatentJoinType.PAT_INVALID_COUNTRY,1);
+		}
+	    }
+	}
+    }
+    
+    public static class percentReduce extends MapReduceBase implements Reducer<Text, Text, Text, Text>  {
+        public void reduce(Text key, Iterator<Text> values, OutputCollector<Text,Text> output, Reporter reporter) throws IOException {
+	    float sum = 0;
+	    float total = 0;
+	    float percent = 0;
+	    Text percent_out = new Text();
+	    String value_string = new String();
+	    String[] words;
+
+	    while (values.hasNext()) {
+		value_string = values.next().toString();
+		words=value_string.split(",");
+		if (words.length == 2) {
+		    sum += Integer.parseInt(words[0],10);
+		    total += Integer.parseInt(words[1],10);
+		};
+	    }	    
+	    
+	    percent = (sum / total);
+	    percent_out.set(String.format("%02.2f",percent));
+	    output.collect(key,percent_out);
+	}
     }
     
     public int run(String[] args) throws Exception {
@@ -299,13 +373,11 @@ public class PatentJoin extends Configured implements Tool {
         job1.setOutputFormat(TextOutputFormat.class);
         job1.setJarByClass(org.myorg.PatentJoin.class); // added to example for local build
 
-        //JobConf mapAConf = new JobConf(false);
-        //ChainMapper.addMapper(job1, filterMapper.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapAConf);
-	job1.setMapperClass(filterMapper.class);
+        JobConf mapAConf = new JobConf(false);
+        ChainMapper.addMapper(job1, filterMapper.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapAConf);
 
-	//JobConf reduceConf = new JobConf(false);
-	//ChainReducer.setReducer(job1, Reduce.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceConf);
-	job1.setReducerClass(Reduce.class);
+	JobConf reduceAConf = new JobConf(false);
+	ChainReducer.setReducer(job1, Reduce.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceAConf);
         //JobClient.runJob(job1);
 
 	JobConf job2 = new JobConf(new Configuration(), PatentJoin.class);
@@ -326,11 +398,27 @@ public class PatentJoin extends Configured implements Tool {
         ChainMapper.addMapper(job2, swizzler.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapCConf);        
 
         JobConf reduceBConf = new JobConf(false);
-        ChainReducer.setReducer(job2, augmenter.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapBConf);        
+        ChainReducer.setReducer(job2, augmenter.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceBConf);        
 	
-        //job2.setMapperClass(swizzler.class);
-	//job2.setReducerClass(augmenter.class);
-	JobClient.runJob(job2);
+	//JobClient.runJob(job2);
+	
+	JobConf job3 = new JobConf(new Configuration(), PatentJoin.class);
+	job3.setJobName("patentjoin2");        
+
+	FileInputFormat.addInputPath(job3, augmented_data);
+	FileOutputFormat.setOutputPath(job3, output_data);
+
+	job3.setInputFormat(TextInputFormat.class);
+	job3.setOutputFormat(TextOutputFormat.class);
+	job3.setJarByClass(org.myorg.PatentJoin.class); // added to example for local build
+	
+        JobConf mapDConf = new JobConf(false);
+        ChainMapper.addMapper(job3, swizzleState.class, LongWritable.class, Text.class, Text.class, Text.class, true, mapBConf);    
+
+        JobConf reduceCConf = new JobConf(false);
+        ChainReducer.setReducer(job3, percentReduce.class, Text.class, Text.class, Text.class, Text.class, true, reduceCConf);	
+	JobClient.runJob(job3);
+
 	return 0;
     }
 

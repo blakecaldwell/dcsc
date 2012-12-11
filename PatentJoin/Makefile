@@ -12,7 +12,7 @@ PatentJoin.jar: PatentJoin.java
 
 run:	PatentJoin.jar	
 	-hadoop fs -rm -r output
-	-hadoop fs -rm -r augmented
+#	-hadoop fs -rm -r augmented
 #	-hadoop fs -rm -r intermediate
 	hadoop jar ./PatentJoin.jar org.myorg.PatentJoin patents/pat63_99.txt patents/cite75_99.txt intermediate augmented output
 
