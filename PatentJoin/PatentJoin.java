@@ -26,15 +26,18 @@ public class PatentJoin extends Configured implements Tool {
 	MAP_CITE_FILE, MAP_PAT_FILE, BAD_RECORD_IN_REDUCE,
 	    CITE_VALID, CITE_INVALID, CMADE_VALID,
 	    PAT_VALID_STATE, PAT_INVALID_STATE, KEY_NOT_NUM,
-	    NUMBER_EXCEPTION, PAT_INVALID_COUNTRY, BAD_RECORD,
-	    REDUCE_INVALID_STATE, REDUCE_VALID_STATE, REDUCE_BAD_RECORD
+	    CMADE_INVALID, PAT_INVALID_COUNTRY, BAD_RECORD,
+	    REDUCE_INVALID_STATE, REDUCE_VALID_STATE, REDUCE_BAD_RECORD,
+	    AUGMENT_CITED_STATE_RECORD, AUGMENT_PATENT_RECORD,
+	    PAT_RECORD, CIT_RECORD, INTERMEDIATE_RECORD
 	    };
     
 
-    public static class mapperA extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
+    public static class filterMapper extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
 	private Text cited = new Text();
 	private Text country = new Text();
 	private Text state = new Text();
+	private Text out_value = new Text();
 	private LongWritable patent = new LongWritable();
 	private final static Text us_country = new Text("\"US\"");
 
@@ -48,6 +51,10 @@ public class PatentJoin extends Configured implements Tool {
 	    numTokens = words.length;
 	    
 	    if (numTokens > 5) {
+		reporter.incrCounter(PatentJoinType.PAT_RECORD,1);
+		// This is a patent record. Our goal here is to pass through records that:
+		//   1. are in the US
+		//   2. have a valid state 
 		country.set(words[4]);
 		if (country.equals(us_country) == true) { 	// make sure its in the US and then get the state   
 		    if ((words[5].length() == 4) && (words[5].startsWith(bookend)) && (words[5].endsWith(bookend))) {
@@ -59,8 +66,10 @@ public class PatentJoin extends Configured implements Tool {
 			} catch (java.lang.NumberFormatException e) {
 			    reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
 			}
-			state.set(words[5]);
-			output.collect(patent,state);
+			//state.set(words[5]);
+			//output.collect(patent,state);
+			out_value.set(line);
+			output.collect(patent,out_value);
 		    }
 		    else {
 			reporter.incrCounter(PatentJoinType.PAT_INVALID_STATE,1);
@@ -71,7 +80,8 @@ public class PatentJoin extends Configured implements Tool {
 		}
 	    }
 	    else if (numTokens == 2) {
-		// this is the citation file. just pass all by the first record through
+		reporter.incrCounter(PatentJoinType.CIT_RECORD,1);
+		// this is the citation file. just pass all but the first record through
 		String skip_string = "\"CITING\"";
 		if (! words[0].startsWith(skip_string)) {
 		    try {
@@ -82,6 +92,10 @@ public class PatentJoin extends Configured implements Tool {
 		    cited.set(words[1]);
 		    output.collect(patent,cited);
 		}
+	    }
+	    else {
+		reporter.incrCounter(PatentJoinType.INTERMEDIATE_RECORD,1);
+		output.collect(key,value);
 	    }
 	}
     }
@@ -120,10 +134,13 @@ public class PatentJoin extends Configured implements Tool {
     public static class swizzler extends MapReduceBase implements Mapper<LongWritable, Text, LongWritable,Text> {
 	private Text values = new Text();
 	private Text country = new Text();
+	private Text cited_state = new Text();
 	private LongWritable output_key = new LongWritable();
+	    
 	private final static Text us_country = new Text("\"US\"");
-
+	    
 	public void map(LongWritable key, Text value, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
+
 	    int numTokens = 0;
 	    long num_citations_made = 0;
 	    String line = value.toString();
@@ -153,7 +170,7 @@ public class PatentJoin extends Configured implements Tool {
 				num_citations_made = Long.parseLong(words[12],10);				    
 			    } catch (java.lang.NumberFormatException e) {
 				System.err.println("error turning into long: " + words[12]);
-				reporter.incrCounter(PatentJoinType.NUMBER_EXCEPTION,1);
+				reporter.incrCounter(PatentJoinType.CMADE_INVALID,1);
 				num_citations_made = 0;
 			    }
 			    if (num_citations_made > 0) {
@@ -162,10 +179,16 @@ public class PatentJoin extends Configured implements Tool {
 				    output_key.set(Long.parseLong(words[0],10));
 				} catch (java.lang.NumberFormatException e) {
 				    reporter.incrCounter(PatentJoinType.KEY_NOT_NUM,1);
+				    return;
 				}
 				// send on the whole line to the reducer
-				values.set(words[5] + " " + words [12]);
+				values.set(line);
+				//values.set(words[5] + " " + words [12]);
 				output.collect(output_key,values);
+			    }
+			    else {
+				// make this counter balance (include CMADE=0)
+				reporter.incrCounter(PatentJoinType.CMADE_INVALID,1);
 			    }
 			}
 		    }
@@ -177,7 +200,7 @@ public class PatentJoin extends Configured implements Tool {
 		    reporter.incrCounter(PatentJoinType.PAT_INVALID_COUNTRY,1);
 		}		
 	    }
-	    else if (numTokens == 3 ) {     // this is the citation file
+	    else if (numTokens == 3 ) {     // this is intermediate citation data with the state
 		String skip_string = "\"CITING\"";
 		if (! words[0].startsWith(skip_string)) {
 		    // swizzle: make the cited patent the key
@@ -189,9 +212,11 @@ public class PatentJoin extends Configured implements Tool {
 		    // leave out the CITING patent - don't need now that we know the state
 		    String bookend = "\"";
 		    // make sure this is actually a string
-		    //if ((words[2].startsWith(bookend)) && (words[2].endsWith(bookend))) {
-		    if (words[2].length() == 4) {
-			output.collect(output_key, values);
+		    if ((words[2].length() == 4) &&
+			(words[2].startsWith(bookend)) &&
+			(words[2].endsWith(bookend))) {
+			cited_state.set(words[2]);
+			output.collect(output_key, cited_state);
 			reporter.incrCounter(PatentJoinType.CITE_VALID,1);	       
 		    }
 		    else {
@@ -210,46 +235,50 @@ public class PatentJoin extends Configured implements Tool {
 	}
     }
     public static class augmenter extends MapReduceBase implements Reducer<LongWritable, Text, LongWritable,Text>  {
-	private String patent_state=null;
-	private int cited_count = 0;
-	private String patent_line=null;
-	private ArrayList<String> citedStates= new ArrayList<String>();
-	private String currentVal=null;
-	private Text value = new Text();
-	
-        public void reduce(LongWritable key, Iterator<Text> values, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
-	    while (values.hasNext()) { 
-		currentVal = values.next().toString();
-		if (currentVal.length() > 4) {
-		    // this is the patent data
-		    patent_line = currentVal;
-		}
-		else {
-		    // these are states of patents cited by this one
-		    citedStates.add(currentVal);
-		}
-	    }
+       public void reduce(LongWritable key, Iterator<Text> values, OutputCollector<LongWritable,Text> output, Reporter reporter) throws IOException {
+	   String patent_state=null;
+	   int cited_count = 0;
+	   int num_splits = 0;
+	   String patent_line=null;
+	   ArrayList<String> citedStates= new ArrayList<String>();
+	   String currentVal=null;
+	   Text value = new Text();
+	 
+	   while (values.hasNext()) {
+	       currentVal = values.next().toString();
+	       num_splits = currentVal.split(",").length;
+	       if (num_splits > 1) {
+		   reporter.incrCounter(PatentJoinType.AUGMENT_PATENT_RECORD,1);
+		   // this is the patent data
+		   patent_line = currentVal;
+	       }
+	       else if (num_splits == 1) {
+		   reporter.incrCounter(PatentJoinType.AUGMENT_CITED_STATE_RECORD,1);
+		   // these are states of patents cited by this one
+		   citedStates.add(currentVal);
+	       }
+	   }
 	    
-	    if (patent_line != null) {
-		patent_state = currentVal.split(",")[5];
-		if (patent_state.length() == 4) {
-		    for (String state: citedStates) {
-			if (state == patent_state) {
-			    cited_count++;
-			}
-		    }
-		    value.set(patent_state + "," + cited_count);
+	   if ((patent_line != null) && (patent_line.split(",").length > 5)) {
+	       patent_state = patent_line.split(",")[5];
+	       if (patent_state.length() == 4) {
+		   for (String state: citedStates) {
+		       if (state.equals(patent_state)) {
+			   cited_count++;
+		       }
+		   }
+		   value.set(patent_line + "," + cited_count);
 		    output.collect(key, value);
 		    reporter.incrCounter(PatentJoinType.REDUCE_VALID_STATE,1);
-		}
-		else {
-		    reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
-		}
-	    }
-	    else {
-		reporter.incrCounter(PatentJoinType.REDUCE_BAD_RECORD,1);
-	    }
-	}
+	       }
+	       else {
+		   reporter.incrCounter(PatentJoinType.REDUCE_INVALID_STATE,1);
+	       }
+	   }
+	   else {
+	       reporter.incrCounter(PatentJoinType.REDUCE_BAD_RECORD,1);	       
+	   }
+       }
     }
     
     public int run(String[] args) throws Exception {
@@ -271,14 +300,13 @@ public class PatentJoin extends Configured implements Tool {
         job1.setJarByClass(org.myorg.PatentJoin.class); // added to example for local build
 
         //JobConf mapAConf = new JobConf(false);
-        //ChainMapper.addMapper(job1, mapperA.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapAConf);
-	job1.setMapperClass(mapperA.class);
+        //ChainMapper.addMapper(job1, filterMapper.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapAConf);
+	job1.setMapperClass(filterMapper.class);
 
-	// Just use a single Reducer. Use these lines to use a chain reducer
 	//JobConf reduceConf = new JobConf(false);
-	//ChainReducer.setReducer(conf, Reduce.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceConf);
+	//ChainReducer.setReducer(job1, Reduce.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, reduceConf);
 	job1.setReducerClass(Reduce.class);
-        JobClient.runJob(job1);
+        //JobClient.runJob(job1);
 
 	JobConf job2 = new JobConf(new Configuration(), PatentJoin.class);
 	job2.setJobName("patentjoin2");        
@@ -290,10 +318,17 @@ public class PatentJoin extends Configured implements Tool {
 	job2.setInputFormat(TextInputFormat.class);
 	job2.setOutputFormat(TextOutputFormat.class);
 	job2.setJarByClass(org.myorg.PatentJoin.class); // added to example for local build
+	
+        JobConf mapBConf = new JobConf(false);
+        ChainMapper.addMapper(job2, filterMapper.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapBConf);        
 
-        //JobConf mapBConf = new JobConf(false);
-        //ChainReducer.addMapper(conf, swizzler.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapBConf);        
-        job2.setMapperClass(swizzler.class);
+        JobConf mapCConf = new JobConf(false);
+        ChainMapper.addMapper(job2, swizzler.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapCConf);        
+
+        JobConf reduceBConf = new JobConf(false);
+        ChainReducer.setReducer(job2, augmenter.class, LongWritable.class, Text.class, LongWritable.class, Text.class, true, mapBConf);        
+	
+        //job2.setMapperClass(swizzler.class);
 	//job2.setReducerClass(augmenter.class);
 	JobClient.runJob(job2);
 	return 0;
